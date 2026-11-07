@@ -44,7 +44,7 @@ CPU 的 176 个逻辑线程不等于 Maya 使用 176 个专家线程。GPU 内�
 - [当前线上参数](configs/ac922/online-v1.1.53.example.json)。实际线上原文件仍单独保留，示例不覆盖它。
 - [实验功能参数](configs/ac922/experimental-v1.1.53.example.json)。该文件描述旧实验二进制的功能开关，去除了逐请求控制文件、日志导出和诊断设置，**不是完整复现实验的驱动脚本，也不是已验证的新版本部署配置**。
 
-实验开启项是 `DS4_TP_PAIR=1`、`DS4_PAIR_GPU_STATE=1`、`DS4_PAIR_ALIAS_STATE=1`、`DS4_PAIR_HOT_MAP=1`、`DS4_PAIR_DOWN_SLICE=1`、`DS4_ENGRAM_DIRECT_PREFILL=1`。`DS4_PAIR_EARLY_VRAM=0` 保持关闭。全局 `DS4_FLOW_DOWN_PART` 与两分块路径的原有互斥保护保留；本 fork 的 `DS4_PAIR_DOWN_SLICE` 在配对路径内单独裁剪。
+实验开启项是 `DS4_TP_PAIR=2`、`DS4_PAIR_GPU_STATE=1`、`DS4_PAIR_ALIAS_STATE=1`、`DS4_PAIR_HOT_MAP=1`、`DS4_PAIR_DOWN_SLICE=1`、`DS4_ENGRAM_DIRECT_PREFILL=1`。原始实验使用环境值 `DS4_TP_PAIR=1` 加值为 `2` 的控制文件，实际生效模式为 `2`；示例移除控制文件后必须直接写 `2`，才能启用相同的状态驻留路径。`DS4_PAIR_EARLY_VRAM=0` 保持关闭。全局 `DS4_FLOW_DOWN_PART` 与两分块路径的原有互斥保护保留；本 fork 的 `DS4_PAIR_DOWN_SLICE` 在配对路径内单独裁剪。
 
 POWER9 上曾发生 ATS/UVM 相关内存注册故障。本 fork 保留禁止专家大块 `cudaHostRegister` 的保护，搬运池使用 `cudaHostAlloc`；不把 `DS4_COPY_PIN=1` 当作本机提速配置。
 

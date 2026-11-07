@@ -51,7 +51,7 @@
     "DS4_ENGRAM_CACHE_MB": "512",
     "DS4_AR2": "0",
     "DS4_ENGRAM_DIRECT_PREFILL": "1",
-    "DS4_TP_PAIR": "1",
+    "DS4_TP_PAIR": "2",
     "DS4_PAIR_GPU_STATE": "1",
     "DS4_PAIR_ALIAS_STATE": "1",
     "DS4_PAIR_HOT_MAP": "1",
