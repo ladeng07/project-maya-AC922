@@ -1,0 +1,166 @@
+{
+  "date": "2026-11-07",
+  "timezone": "Asia/Shanghai",
+  "model": "DeepSeek-V4.1-Flash-1017 / Maya-S GGUF",
+  "tested_base": "37b1e848df0de7b6934d11059b4339b4ea53c8d2",
+  "tested_binary_sha256": "341da7b6bbe214f1d382860036d2da31a4491bc5d0f96bab70478d1c570beede",
+  "merged_version_performance_tested": false,
+  "comparison": "DS4_PAIR_DOWN_SLICE off vs on; all other experimental features fixed",
+  "settings": {
+    "tp": 2,
+    "chunk": 4096,
+    "max_context": 262144,
+    "engram_cache_mib": 512,
+    "cpu_expert_threads": 22,
+    "expert_readers_per_gpu": 8
+  },
+  "order": [
+    "off/on",
+    "on/off",
+    "on/off",
+    "off/on"
+  ],
+  "prefill": [
+    {
+      "case": "tiny",
+      "input_tokens": 82,
+      "off_tokens_per_s": [
+        41.5,
+        46.2,
+        47.6,
+        50.4
+      ],
+      "on_tokens_per_s": [
+        42.7,
+        44.8,
+        46.2,
+        52.2
+      ],
+      "off_harmonic_mean": 46.194134338009285,
+      "on_harmonic_mean": 46.219935994391776,
+      "gain_percent": 0.05585483255015067,
+      "off_mean_ttft_s": 1.7832367902483384,
+      "on_mean_ttft_s": 1.7822015050005575
+    },
+    {
+      "case": "single_chunk",
+      "input_tokens": 2660,
+      "off_tokens_per_s": [
+        401.4,
+        421.1,
+        414.6,
+        416.8
+      ],
+      "on_tokens_per_s": [
+        407.3,
+        410.5,
+        411.3,
+        414.6
+      ],
+      "off_harmonic_mean": 413.34232038466337,
+      "on_harmonic_mean": 410.90859571607615,
+      "gain_percent": -0.5887915532874377,
+      "off_mean_ttft_s": 6.44772740325061,
+      "on_mean_ttft_s": 6.483723616503994
+    },
+    {
+      "case": "three_chunks",
+      "input_tokens": 9667,
+      "off_tokens_per_s": [
+        631.1,
+        626.4,
+        646.3,
+        645.0
+      ],
+      "on_tokens_per_s": [
+        751.7,
+        755.0,
+        749.7,
+        755.2
+      ],
+      "off_harmonic_mean": 637.0831158507812,
+      "on_harmonic_mean": 752.8928949967379,
+      "gain_percent": 18.17812719637071,
+      "off_mean_ttft_s": 15.19141524575025,
+      "on_mean_ttft_s": 12.859509071753564
+    },
+    {
+      "case": "hot64k",
+      "input_tokens": 65384,
+      "off_tokens_per_s": [
+        1180.3,
+        1214.5,
+        1214.0,
+        1225.3
+      ],
+      "on_tokens_per_s": [
+        1373.9,
+        1375.8,
+        1384.7,
+        1366.9
+      ],
+      "off_harmonic_mean": 1208.2853721360814,
+      "on_harmonic_mean": 1375.2957399083764,
+      "gain_percent": 13.822096304703567,
+      "off_mean_ttft_s": 54.181280103752215,
+      "on_mean_ttft_s": 47.614243449752394
+    }
+  ],
+  "decode": {
+    "input_cache_tokens": 65383,
+    "output_tokens_per_run": 512,
+    "off_tokens_per_s": [
+      26.5,
+      27.8,
+      28.5,
+      28.7,
+      28.8,
+      27.3,
+      30.1,
+      30.2,
+      29.3,
+      28.5,
+      29.5,
+      29.8
+    ],
+    "on_tokens_per_s": [
+      28.8,
+      28.8,
+      28.9,
+      27.0,
+      28.1,
+      29.0,
+      28.9,
+      29.2,
+      30.0,
+      29.0,
+      29.5,
+      30.0
+    ],
+    "off_harmonic_mean": 28.708257997641518,
+    "on_harmonic_mean": 28.912187149470274,
+    "gain_percent": 0.7103501433124659
+  },
+  "expert_slots": 6463,
+  "gpu_state_capacity_mib": [
+    320,
+    274,
+    320,
+    274,
+    274,
+    320
+  ],
+  "verification": {
+    "requests": 101,
+    "fact_probes_passed": 62,
+    "fact_probes_total": 62,
+    "first_logit_cases": 4
+  },
+  "limitations": [
+    "First and profile rounds excluded from means",
+    "OS page cache not flushed",
+    "No down-slice 262K full-length, concurrent, cancellation or model fault-injection run",
+    "First-logit/fact probes are not comprehensive quality evaluation",
+    "Historical experiment results do not describe merged v1.1.56 performance"
+  ]
+}

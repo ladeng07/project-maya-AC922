@@ -4964,9 +4964,10 @@ int cuda_numa_node(int dev) {   // (-1: unknown)
     return node;
 }
 // pinned host memory on NUMA node `node` (-1: anywhere; preferred, as os::anon_alloc: a full node lends the rest from
-// the others, #507), mapped for every device (Windows: anywhere)
+// the others, #507), mapped for every device. POWER uses cudaHostAlloc like Windows:
+// registering existing pages can trigger the AC922 ATS/UVM kernel panic.
 void* numa_pinned(size_t bytes, int node) {
-#if defined(_WIN32)
+#if defined(_WIN32) || defined(__powerpc64__)
     (void) node;
     void* p = nullptr;
     if (cudaHostAlloc(&p, bytes, cudaHostAllocPortable | cudaHostAllocMapped) != cudaSuccess) return nullptr;
@@ -4989,7 +4990,7 @@ void* numa_pinned(size_t bytes, int node) {
 #endif
 }
 void numa_free(void* p, size_t bytes) {
-#if defined(_WIN32)
+#if defined(_WIN32) || defined(__powerpc64__)
     (void) bytes;
     cudaFreeHost(p);
 #else

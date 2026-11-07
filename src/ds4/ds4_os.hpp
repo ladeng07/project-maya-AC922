@@ -42,6 +42,21 @@ namespace strata::ds4::os {
 using fd_t = intptr_t;
 constexpr fd_t kBadFd = -1;
 
+// Memory-page alignment is independent of the filesystem's direct-I/O alignment.
+inline size_t system_page_size() {
+    static const size_t bytes = [] {
+#if defined(_WIN32)
+        SYSTEM_INFO info{};
+        GetSystemInfo(&info);
+        return (size_t) (info.dwPageSize ? info.dwPageSize : 4096);
+#else
+        const long value = sysconf(_SC_PAGESIZE);
+        return (size_t) (value > 0 ? value : 4096);
+#endif
+    }();
+    return bytes;
+}
+
 #if defined(_WIN32)
 inline std::wstring wide(const std::string& s) {   // UTF-8 -> UTF-16 (a path with non-ASCII characters)
     const int n = MultiByteToWideChar(CP_UTF8, 0, s.c_str(), -1, nullptr, 0);
@@ -338,7 +353,7 @@ inline uint64_t working_set_bytes() {
     unsigned long long size = 0, resident = 0;
     const int got = std::fscanf(f, "%llu %llu", &size, &resident);
     std::fclose(f);
-    return got == 2 ? resident * 4096ull : 0;
+    return got == 2 ? resident * (uint64_t) system_page_size() : 0;
 #endif
 }
 
@@ -390,7 +405,7 @@ inline void prefetch(const std::vector<std::pair<const void*, size_t>>& ranges) 
     }
     PrefetchVirtualMemory(GetCurrentProcess(), (ULONG_PTR) r.size(), r.data(), 0);
 #else
-    const uintptr_t pg = 4096;
+    const uintptr_t pg = system_page_size();
     for (const auto& x : ranges) {
         const uintptr_t a = (uintptr_t) x.first, b = a & ~(pg - 1);
         madvise((void*) b, x.second + (a - b), MADV_WILLNEED);
@@ -405,7 +420,7 @@ inline bool resident(const void* p, size_t n) {
     (void) p, (void) n;
     return false;
 #else
-    const uintptr_t pg = 4096, a = (uintptr_t) p, b = a & ~(pg - 1);
+    const uintptr_t pg = system_page_size(), a = (uintptr_t) p, b = a & ~(pg - 1);
     const size_t len = n + (a - b), np = (len + pg - 1) / pg;
     thread_local std::vector<unsigned char> v;
     if (v.size() < np) v.resize(np);
@@ -423,7 +438,7 @@ inline bool resident(const void* p, size_t n) {
 /// read together, so they come and go together: a wrong "yes" costs page faults, a wrong "no" a prefetch.
 inline bool resident_sampled(const void* p, size_t bytes, int samples = 8) {
     if (bytes == 0) return true;
-    const uintptr_t pg = 4096, a = (uintptr_t) p, span = bytes - 1;
+    const uintptr_t pg = system_page_size(), a = (uintptr_t) p, span = bytes - 1;
     samples = std::max(1, std::min(samples, 16));
 #if defined(_WIN32)
     PSAPI_WORKING_SET_EX_INFORMATION w[16] = {};
@@ -503,9 +518,10 @@ inline void* anon_alloc(size_t bytes, int node, int nodes) {
     if (m == MAP_FAILED) return nullptr;
     madvise(m, bytes, MADV_HUGEPAGE);
     if (node >= 0 && nodes > 1) {
-        unsigned long mask[4] = {0, 0, 0, 0};
-        mask[node / 64] = 1ul << (node % 64);
-        if (syscall(SYS_mbind, m, bytes, 1 /* MPOL_PREFERRED */, mask, 256, 0) != 0) {
+        constexpr size_t bits = 8 * sizeof(unsigned long);
+        std::vector<unsigned long> mask((size_t) node / bits + 1, 0);
+        mask[(size_t) node / bits] = 1ul << ((size_t) node % bits);
+        if (syscall(SYS_mbind, m, bytes, 1 /* MPOL_PREFERRED */, mask.data(), mask.size() * bits, 0) != 0) {
             // (said once: without it the per-node copies land wherever first touch puts them and nothing shows it -
             //  Docker's default seccomp profile refuses mbind to a container without CAP_SYS_NICE)
             static std::atomic<bool> said{false};
@@ -566,9 +582,10 @@ inline void* huge_alloc(size_t bytes, int node, int nodes, size_t* got) {
                      -1, 0);
     if (m == MAP_FAILED) return nullptr;
     if (node >= 0 && nodes > 1) {
-        unsigned long mask[4] = {0, 0, 0, 0};
-        mask[node / 64] = 1ul << (node % 64);
-        syscall(SYS_mbind, m, hb, 1 /* MPOL_PREFERRED */, mask, 256, 0);
+        constexpr size_t bits = 8 * sizeof(unsigned long);
+        std::vector<unsigned long> mask((size_t) node / bits + 1, 0);
+        mask[(size_t) node / bits] = 1ul << ((size_t) node % bits);
+        syscall(SYS_mbind, m, hb, 1 /* MPOL_PREFERRED */, mask.data(), mask.size() * bits, 0);
     }
     if (got != nullptr) *got = hb;
     return m;

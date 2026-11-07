@@ -124,6 +124,7 @@ struct EgBatch {
     bool live = false;                                                  // submitted and not yet finished
     int64_t lookups = 0;                                                // logical lookups before sorted dedup
     int io_reads = 0;                                                   // canonical read attempts submitted (after dedup)
+    bool prefill_direct = false;  // explicitly set by the Q6_K chunk-prefill caller; never inferred from batch size
     void clear() {
         reads.clear();
         dups.clear();
@@ -133,6 +134,7 @@ struct EgBatch {
         live = false;
         lookups = 0;
         io_reads = 0;
+        prefill_direct = false;
     }
 };
 
@@ -414,7 +416,15 @@ public:
         done_cv_.wait(lk, [&] { return b.left.load(std::memory_order_acquire) == 0; });
     }
 
+    struct DirectStats { uint64_t rows = 0, bytes = 0, fallback = 0, open_fail = 0, read_fail = 0; };
+    DirectStats direct_stats() const {
+        return {direct_rows_.load(), direct_bytes_.load(), direct_fallback_.load(),
+                direct_open_fail_.load(), direct_read_fail_.load()};
+    }
+
 private:
+    std::atomic<uint64_t> direct_rows_{0}, direct_bytes_{0}, direct_fallback_{0};
+    std::atomic<uint64_t> direct_open_fail_{0}, direct_read_fail_{0};
     struct RamRange { int file; uint64_t off, n; uint8_t* base; size_t mapped, delta; };
     std::vector<RamRange> ram_;
     bool ram_only_ = false;
@@ -425,8 +435,14 @@ private:
         return false;
     }
     void loop() {
+#if defined(__linux__)
+        pthread_setname_np(pthread_self(), "maya-engram");
+#endif
         std::vector<os::fd_t> fds(paths_.size(), os::kBadFd);   // this thread's own handles, opened on first use
         std::vector<os::fd_t> ufds(paths_.size(), os::kBadFd);  // (and its unbuffered ones)
+        // Separate from the old buffered/Windows descriptors: decode never uses these handles.
+        std::vector<os::fd_t> dfds(paths_.size(), os::kBadFd);
+        std::vector<char> direct_disabled(paths_.size(), 0);
         std::vector<uint8_t> buf, abuf(3 * os::kDirectAlign);
         uint8_t* al = abuf.data() + (os::kDirectAlign - (uintptr_t) abuf.data() % os::kDirectAlign) % os::kDirectAlign;
         for (;;) {
@@ -441,13 +457,24 @@ private:
             }
             EgBatch& b = *job.b;
             int done = 0;
+            DirectStats direct;
             if (job.zone) {
                 read_zone(fds, ufds, buf, b, job);
                 done = (int) job.rows.size();
             } else {
-                for (int i = job.i0; i < job.i1; ++i) b.ok[(size_t) i] = read(fds, ufds, al, b.reads[(size_t) i], buf) ? 1 : 0;
+                for (int i = job.i0; i < job.i1; ++i)
+                    b.ok[(size_t) i] = read(fds, ufds, dfds, direct_disabled, al, b.reads[(size_t) i], buf,
+                                           b.prefill_direct, direct) ? 1 : 0;
                 done = job.i1 - job.i0;
             }
+            // Aggregate once per queued job, not once per row on a shared atomic cache line.
+            if (direct.rows) {
+                direct_rows_.fetch_add(direct.rows, std::memory_order_relaxed);
+                direct_bytes_.fetch_add(direct.bytes, std::memory_order_relaxed);
+            }
+            if (direct.fallback) direct_fallback_.fetch_add(direct.fallback, std::memory_order_relaxed);
+            if (direct.open_fail) direct_open_fail_.fetch_add(direct.open_fail, std::memory_order_relaxed);
+            if (direct.read_fail) direct_read_fail_.fetch_add(direct.read_fail, std::memory_order_relaxed);
             const int64_t t = now_ns();
             for (int64_t prev = b.t1.load(); t > prev && !b.t1.compare_exchange_weak(prev, t);) {
             }
@@ -458,9 +485,11 @@ private:
         }
         for (os::fd_t f : fds) os::close_fd(f);
         for (os::fd_t f : ufds) os::close_fd(f);
+        for (os::fd_t f : dfds) os::close_fd(f);
     }
-    bool read(std::vector<os::fd_t>& fds, std::vector<os::fd_t>& ufds, uint8_t* al, const EgRead& r,
-              std::vector<uint8_t>& buf) {
+    bool read(std::vector<os::fd_t>& fds, std::vector<os::fd_t>& ufds, std::vector<os::fd_t>& dfds,
+              std::vector<char>& direct_disabled, uint8_t* al, const EgRead& r,
+              std::vector<uint8_t>& buf, bool prefill_direct, DirectStats& direct) {
         if (ram_only_) {
             if (!r.mx8) {
                 return copy_ram(r.file, r.off, r.n, r.dst) &&
@@ -474,6 +503,31 @@ private:
             }
             return true;
         }
+#if !defined(_WIN32)
+        if (prefill_direct && !r.mx8 && r.n2 == 0 && r.n > 0 && r.file >= 0 &&
+            (size_t) r.file < paths_.size() && r.off <= UINT64_MAX - r.n - os::kDirectAlign &&
+            os::direct_span(r.off, r.n) <= 2 * os::kDirectAlign) {
+            const size_t fi = (size_t) r.file;
+            os::fd_t& f = dfds[fi];
+            if (!direct_disabled[fi]) {
+                if (f == os::kBadFd) {
+                    f = os::open_direct(paths_[fi]);
+                    if (f == os::kBadFd) { direct_disabled[fi] = 1; ++direct.open_fail; }
+                }
+                if (f != os::kBadFd) {
+                    if (os::pread_direct(f, al, r.n, r.off)) {
+                        std::memcpy(r.dst, al + r.off % os::kDirectAlign, r.n);
+                        ++direct.rows;
+                        direct.bytes += os::direct_span(r.off, r.n);
+                        return true;
+                    }
+                    ++direct.read_fail;
+                    os::close_fd(f); f = os::kBadFd; direct_disabled[fi] = 1;
+                }
+            }
+            ++direct.fallback;  // the original buffered read below remains authoritative on any failure
+        }
+#endif
         if (r.mx8 && r.file >= 0 && (size_t) r.file < direct_.size() && direct_[(size_t) r.file] &&
             os::direct_span(r.off, r.n) <= 2 * os::kDirectAlign) {
             os::fd_t& u = ufds[(size_t) r.file];

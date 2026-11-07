@@ -1,0 +1,61 @@
+{
+  "exe": "/path/to/downslice-experimental/maya-ds4",
+  "args": [
+    "--pack",
+    "/path/to/model/maya-ds4",
+    "--max-context",
+    "262144",
+    "--tp",
+    "2",
+    "--vision",
+    "off",
+    "--mmap-experts",
+    "on",
+    "--cpu-threads",
+    "22",
+    "--prefill-chunk",
+    "4096"
+  ],
+  "cwd": "/path/to/project-maya",
+  "tokenizer": "/path/to/model/maya-ds4/tokenizer",
+  "model_name": "deepseek-v4.1-flash",
+  "gpu": [
+    0,
+    1,
+    2,
+    3,
+    4,
+    5
+  ],
+  "sampling": {
+    "temperature": 1.0,
+    "top_p": 1.0
+  },
+  "reasoning_effort": "high",
+  "lib_dirs": [],
+  "port": 8080,
+  "env": {
+    "DS4_COPY_NUMA": "1",
+    "DS4_COPY_PIN": "0",
+    "HF_ENDPOINT": "https://hf-mirror.com",
+    "MAYA_DS4_TP_GGUF_UNEVEN": "1",
+    "DS4_STREAM_ZC": "0",
+    "MAYA_DS4_PIN_BY_NEED": "0",
+    "DS4_FLOW_TP": "1",
+    "DS4_FLOW_DOWN_PART": "0",
+    "DS4_FLOW_BUFFERED": "262144",
+    "MAYA_DS4_AR2_DECODE": "0",
+    "DS4_NUMA_STAGE": "2",
+    "DS4_STAGE_DIV": "2",
+    "DS4_LANE_SPIN_US": "20000",
+    "DS4_ENGRAM_CACHE_MB": "512",
+    "DS4_AR2": "0",
+    "DS4_ENGRAM_DIRECT_PREFILL": "1",
+    "DS4_TP_PAIR": "1",
+    "DS4_PAIR_GPU_STATE": "1",
+    "DS4_PAIR_ALIAS_STATE": "1",
+    "DS4_PAIR_HOT_MAP": "1",
+    "DS4_PAIR_DOWN_SLICE": "1",
+    "DS4_PAIR_EARLY_VRAM": "0"
+  }
+}

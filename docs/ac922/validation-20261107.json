@@ -1,0 +1,39 @@
+{
+  "date": "2026-11-07",
+  "timezone": "Asia/Shanghai",
+  "parent_commit": "78c450a23cf40e99ef0dd7204ca88572e1c469ed",
+  "validated_source_tree": "a5ffc1ae436c798d438e166b5f6132e85bbdd5a6",
+  "source_matches_previously_built_v1_1_56_merge_ignoring_line_endings": true,
+  "prior_full_cuda_build": "CUDA 12.4 / sm_70 / POWER9; binary SHA256 26c914fac602abb37e3174843507d0d10dbb27de079ff1444c43aaae5ae38683",
+  "prior_component_groups_passed": 9,
+  "published_component_groups_passed": 3,
+  "tests": {
+    "components": {
+      "exit_code": 0
+    },
+    "server": {
+      "exit_code": 0,
+      "total": 125,
+      "passed": 121,
+      "skipped": 4,
+      "skip_reasons": [
+        "test_official_sdk_create_and_stream (serve.test_responses.Responses.test_official_sdk_create_and_stream) ... skipped 'optional OpenAI SDK is not installed'",
+        "test_official_sdk_stored_conversation_and_pagination (serve.test_responses.Responses.test_official_sdk_stored_conversation_and_pagination) ... skipped 'optional OpenAI SDK is not installed'",
+        "test_sdk_background_retrieve_stream_cancel_and_delete (serve.test_response_jobs.BackgroundResponses.test_sdk_background_retrieve_stream_cancel_and_delete) ... skipped 'optional OpenAI SDK is not installed'",
+        "test_the_tree_ends_with_its_owner (serve.test_stop.WindowsJob.test_the_tree_ends_with_its_owner) ... skipped \"Windows' job objects (and psutil)\""
+      ]
+    }
+  },
+  "python_syntax_files": 230,
+  "test_python_utf8": true,
+  "production_unchanged": true,
+  "production_health": "ok",
+  "production_version": "1.1.53",
+  "original_config_and_three_binaries_sha256_verified": true,
+  "full_model_performance_tested_on_merge": false,
+  "limitations": [
+    "Mock-engine API/process lifecycle tests do not replace full-model testing",
+    "Optional SDK and platform-specific tests may be skipped; see skip_reasons",
+    "Historical v1.1.53 experiment throughput must not be attributed to this v1.1.56 merge"
+  ]
+}

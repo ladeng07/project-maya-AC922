@@ -16,6 +16,8 @@
 #include <vector>
 
 #include "ds4_os.hpp"
+#include "ds4_io_profile.hpp"
+#include <memory>
 #if defined(_MSC_VER)
 #include <intrin.h>
 #endif
@@ -34,9 +36,10 @@ inline void cpu_relax() {
 
 class Pool {
 public:
-    explicit Pool(int n, const std::vector<int>& cpus = {}, int spin_us = 200) : spin_us_(spin_us) {
+    explicit Pool(int n, const std::vector<int>& cpus = {}, int spin_us = 200,
+                  std::function<void()> on_start = {}) : spin_us_(spin_us) {
         for (int i = 0; i < n; ++i) {
-            th_.emplace_back([this] { loop(); });
+            th_.emplace_back([this, on_start] { if (on_start) on_start(); loop(); });
             if (!cpus.empty()) os::pin_thread(th_.back(), cpus[(size_t) i % cpus.size()]);
         }
     }
@@ -139,6 +142,14 @@ inline void compact_rows(uint8_t* base, size_t rows, size_t pitch, size_t off, s
     for (size_t r = 0; r < rows; ++r) std::memmove(base + r * len, base + r * pitch + off, len);
 }
 
+inline bool valid_row_slice(size_t total, size_t rows, size_t pitch, size_t off, size_t len) {
+    return rows && pitch && len && off <= pitch && len <= pitch - off && rows <= total / pitch;
+}
+// Non-overlapping mapped source and existing staging destination; no intermediate full matrix.
+inline void copy_row_slice(uint8_t* dst, const uint8_t* src, size_t rows, size_t pitch, size_t off, size_t len) {
+    for (size_t r = 0; r < rows; ++r) std::memcpy(dst + r * len, src + r * pitch + off, len);
+}
+
 /// File reads on threads of their own, in the order they were pushed, the pusher never waiting: the prompt path's
 /// streamed experts (each part of an expert a job), unbuffered where the job has a direct descriptor and its range is
 /// not all in the page cache already (the disk straight into dst, the cache neither used nor disturbed), buffered
@@ -147,6 +158,9 @@ inline void compact_rows(uint8_t* base, size_t rows, size_t pitch, size_t off, s
 class IoQueue {
 public:
     struct Job {
+        bool hot_map=false; // Paired prefill only; immutable mapped file, existing staging destination.
+        bool hot_slice=false; // Paired down matrix: directly pack resident mapped rows, else read then compact.
+        bool diag=false;uint64_t queued_ns=0;int layer=-1,expert=-1,chunk=-1;
         os::fd_t fd = os::kBadFd, dfd = os::kBadFd;
         uint64_t off = 0, len = 0;
         uint8_t* dst = nullptr;
@@ -169,9 +183,18 @@ public:
         // counts
         size_t crows = 0, cpitch = 0, coff = 0, clen = 0;
     };
-    explicit IoQueue(int n) {
-        for (int i = 0; i < n; ++i) th_.emplace_back([this] { loop(); });
+    explicit IoQueue(int n, std::function<void()> on_start = {}) : diag_workers_(new ioprof::Worker[n]),diag_n_(n) {
+        for (int i = 0; i < n; ++i) th_.emplace_back([this, on_start,i] { if (on_start) on_start(); diag_workers_[i].tid=syscall(SYS_gettid);loop(i); });
     }
+    void diag_begin(bool on) {
+        diag_on_=on;if(!on)return;diag_producer_=ioprof::Producer{};
+        for(int i=0;i<diag_n_;++i){auto tid=diag_workers_[i].tid;diag_workers_[i]=ioprof::Worker{};diag_workers_[i].tid=tid;}
+    }
+    void diag_print(int dev) {
+        if(!diag_on_)return;diag_on_=false;diag_producer_.print(dev);
+        for(int i=0;i<diag_n_;++i){const auto& w=diag_workers_[i];std::fprintf(stderr,"ds4 iopool worker dev=%d worker=%d tid=%llu failures=%llu\n",dev,i,(unsigned long long)w.tid,(unsigned long long)w.failures);ioprof::print_time(dev,i,"queue",w.queue);ioprof::print_time(dev,i,"service",w.service);for(int k=0;k<ioprof::NK;++k)ioprof::print_time(dev,i,ioprof::names[k],w.part[k]);}
+    }
+    void diag_tids(int dev)const {for(int i=0;i<diag_n_;++i)std::fprintf(stderr,"ds4 iopool tid dev=%d worker=%d tid=%llu\n",dev,i,(unsigned long long)diag_workers_[i].tid);}
     ~IoQueue() {
         {
             std::lock_guard<std::mutex> lk(mu_);
@@ -181,9 +204,17 @@ public:
         for (auto& t : th_) t.join();
     }
     void push(const Job* jobs, int n) {
+        const auto lock_start=diag_on_?ioprof::wall():0;
         {
             std::lock_guard<std::mutex> lk(mu_);
-            for (int i = 0; i < n; ++i) q_.push_back(jobs[i]);
+            const auto locked=diag_on_?ioprof::wall():0;
+            if(diag_on_)ioprof::add(diag_producer_.lock,locked-lock_start,0);
+            for (int i = 0; i < n; ++i) {
+                Job j=jobs[i];j.diag=diag_on_;
+                if(j.diag){if(!j.mem && !j.dmem)diag_producer_.record(uint64_t(j.fd),j.off,j.len,j.layer,j.expert,j.chunk);j.queued_ns=ioprof::wall();}
+                q_.push_back(j);
+            }
+            if(diag_on_){ioprof::add(diag_producer_.publish,ioprof::wall()-locked,0);diag_producer_.peak=std::max(diag_producer_.peak,uint64_t(q_.size()));}
         }
         if (n == 1) cv_.notify_one();
         else cv_.notify_all();
@@ -197,9 +228,17 @@ public:
     uint64_t direct_bytes() const { return direct_.load(std::memory_order_relaxed); }
     uint64_t buffered_bytes() const { return buffered_.load(std::memory_order_relaxed); }
     uint64_t device_bytes() const { return device_.load(std::memory_order_relaxed); }
+    struct SliceStats { uint64_t jobs=0, full_bytes=0, packed_bytes=0, fallback=0; };
+    SliceStats slice_stats() const {
+        return {slice_jobs_.load(std::memory_order_relaxed),slice_full_.load(std::memory_order_relaxed),
+                slice_packed_.load(std::memory_order_relaxed),slice_fallback_.load(std::memory_order_relaxed)};
+    }
 
 private:
-    void loop() {
+    void loop(int index) {
+#if defined(__linux__)
+        pthread_setname_np(pthread_self(), "maya-expert-io");
+#endif
         for (;;) {
             Job j;
             {
@@ -210,34 +249,54 @@ private:
                 q_.pop_front();
             }
             const auto t0 = std::chrono::steady_clock::now();
+            auto* dw=j.diag?&diag_workers_[index]:nullptr;
+            const auto service_w=dw?ioprof::wall():0, service_c=dw?ioprof::cpu():0;
+            if(dw)ioprof::add(dw->queue,service_w-j.queued_ns,0);
             const uint64_t lead = j.off % os::kDirectAlign;
-            bool ok = false;
-            if (j.dmem != nullptr) {
-                ok = j.dcopy != nullptr && j.dcopy(j.ddev, j.dst, j.dmem, (size_t) j.len);
+            bool ok = false, packed = false;
+            if (j.hot_slice && !valid_row_slice(j.len,j.crows,j.cpitch,j.coff,j.clen)) {
+                // Reject invalid new jobs before either the full read or the in-place compact can write.
+            } else if (j.dmem != nullptr) {
+                ok = ioprof::timed(dw,ioprof::DEVICE,j.len,[&]{return j.dcopy != nullptr && j.dcopy(j.ddev, j.dst, j.dmem, (size_t) j.len);});
                 if (ok) device_.fetch_add(j.len, std::memory_order_relaxed);
             } else if (j.mem != nullptr) {
-                std::memcpy(j.dst, j.mem, (size_t) j.len);
+                ioprof::timed(dw,ioprof::COPY,j.len,[&]{std::memcpy(j.dst,j.mem,(size_t)j.len);return true;});
                 ok = true;
-            } else if (j.dfd != os::kBadFd && !(j.map != nullptr && os::resident(j.map, (size_t) j.len)) &&
-                       os::pread_direct(j.dfd, j.dst, j.len, j.off)) {   // (the page cache's ones: buffered, below)
+            } else if (j.hot_map && j.fd != os::kBadFd && j.dfd == os::kBadFd && j.map && j.len &&
+                       ioprof::timed(dw,ioprof::HOT_CHECK,0,[&]{return os::resident(j.map,(size_t)j.len);})) {
+                // Keep the file-read destination/lead convention. Residency is a hint:
+                // eviction after mincore may fault, but cannot change the immutable file bytes.
+                if (j.hot_slice && j.keep == nullptr) {
+                    ioprof::timed(dw,ioprof::HOT_COPY,j.crows*j.clen,[&]{copy_row_slice(j.dst+lead,(const uint8_t*)j.map,j.crows,j.cpitch,j.coff,j.clen);return true;});
+                    packed = true;
+                    slice_jobs_.fetch_add(1,std::memory_order_relaxed);
+                    slice_full_.fetch_add(j.len,std::memory_order_relaxed);
+                    slice_packed_.fetch_add(j.crows*j.clen,std::memory_order_relaxed);
+                } else {
+                    ioprof::timed(dw,ioprof::HOT_COPY,j.len,[&]{std::memcpy(j.dst+lead,j.map,(size_t)j.len);return true;});
+                }
+                ok = true;
+                buffered_.fetch_add(j.len, std::memory_order_relaxed);
+            } else if (j.dfd != os::kBadFd && ioprof::timed(dw,ioprof::DIRECT,j.len,[&]{return !(j.map != nullptr && os::resident(j.map,(size_t)j.len)) && os::pread_direct(j.dfd,j.dst,j.len,j.off);})) {   // (the page cache's ones: buffered, below)
                 ok = true;
                 direct_.fetch_add(j.len, std::memory_order_relaxed);
-            } else if (os::pread_par(j.fd, j.dst + lead, j.len, j.off)) {
+            } else if (ioprof::timed(dw,ioprof::READ,j.len,[&]{return os::pread_par(j.fd,j.dst+lead,j.len,j.off);})) {
                 ok = true;
                 buffered_.fetch_add(j.len, std::memory_order_relaxed);
             }
             if (ok && j.keep != nullptr && j.mem == nullptr && j.dmem == nullptr)
-                std::memcpy(j.keep, j.dst + lead, (size_t) j.len);
-            if (ok && j.crows > 0)   // (a copy's bytes land at dst, a read's at dst + lead)
-                compact_rows(j.dst + (j.mem != nullptr || j.dmem != nullptr ? 0 : lead), j.crows, j.cpitch, j.coff,
-                             j.clen);
+                ioprof::timed(dw,ioprof::KEEP,j.len,[&]{std::memcpy(j.keep,j.dst+lead,(size_t)j.len);return true;});
+            if (j.hot_slice && !packed) slice_fallback_.fetch_add(1,std::memory_order_relaxed);
+            if (ok && !packed && j.crows > 0)   // (a copy's bytes land at dst, a read's at dst + lead)
+                ioprof::timed(dw,ioprof::COMPACT,j.crows*j.clen,[&]{compact_rows(j.dst+(j.mem!=nullptr||j.dmem!=nullptr?0:lead),j.crows,j.cpitch,j.coff,j.clen);return true;});
             if (j.share != nullptr && (int) j.share->fetch_add(1, std::memory_order_acq_rel) + 1 >= j.share_n) {
                 j.share->store(0, std::memory_order_release);
-                if (j.fd != os::kBadFd) os::advise(j.fd, j.off, j.len, false);
+                if (j.fd != os::kBadFd) ioprof::timed(dw,ioprof::SHARE,j.len,[&]{os::advise(j.fd,j.off,j.len,false);return true;});
             }
             busy_us_.fetch_add((uint64_t) std::chrono::duration_cast<std::chrono::microseconds>(
                                    std::chrono::steady_clock::now() - t0).count(),
                                std::memory_order_relaxed);
+            if(dw){ioprof::add(dw->service,ioprof::wall()-service_w,ioprof::cpu()-service_c,j.len);if(!ok)++dw->failures;}
             if (!ok && j.bad != nullptr) j.bad->store(true, std::memory_order_release);
             if (j.left != nullptr) j.left->fetch_sub(1, std::memory_order_acq_rel);
             {
@@ -248,12 +307,15 @@ private:
         }
     }
     std::vector<std::thread> th_;
+    std::unique_ptr<ioprof::Worker[]> diag_workers_;
+    int diag_n_;bool diag_on_=false;ioprof::Producer diag_producer_;
     std::mutex mu_, done_mu_;
     std::condition_variable cv_, done_cv_;
     std::deque<Job> q_;
     uint64_t done_ = 0;
     bool quit_ = false;
     std::atomic<uint64_t> busy_us_{0}, direct_{0}, buffered_{0}, device_{0};
+    std::atomic<uint64_t> slice_jobs_{0},slice_full_{0},slice_packed_{0},slice_fallback_{0};
 };
 
 }  // namespace strata::ds4

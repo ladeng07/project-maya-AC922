@@ -777,7 +777,9 @@ int serve(strata::ds4::Model& m, const std::string& eos_list, bool spec, float c
     int n_req = 0;
     std::vector<float> dump_lg;
     std::FILE* dump_f = nullptr;
+    const bool dump_first=std::getenv("DS4_SERVE_DUMP_FIRST")!=nullptr;bool dump_seen=false;
     auto dump_rows = [&]() {
+        if(dump_first && dump_seen)return;dump_seen=true;
         if (dump_f != nullptr && m.logits(dump_lg)) std::fwrite(dump_lg.data(), 4, dump_lg.size(), dump_f);
     };
     SpanCache spans;
@@ -1834,6 +1836,7 @@ int serve(strata::ds4::Model& m, const std::string& eos_list, bool spec, float c
         long long d_off = 0, d_acc = 0;
         bool cool = false;
         if (dump_prefix != nullptr) {
+            dump_seen=false;
             if (dump_f != nullptr) std::fclose(dump_f);
             dump_f = std::fopen((std::string(dump_prefix) + "." + std::to_string(++n_req) + ".f32").c_str(), "wb");
             dump_rows();
